@@ -1,6 +1,6 @@
 ---
 name: zotero-ingest
-description: Zotero에 추가된 논문을 PaperArchive wiki로 자동 처리하는 스킬. "새 논문 정리해줘", "zotero 논문 처리해줘", "ingest", "논문 추가됐어", "zotero sync해줘", "새로 추가한 논문 wiki에 넣어줘", "paper ingest", "논문 요약해서 저장해줘" 등 Zotero 논문을 wiki로 옮기고 싶을 때 항상 사용. 명시적으로 요청하지 않아도 논문/paper 추가/정리/ingest 맥락이면 이 스킬을 적극적으로 활용.
+description: Zotero에 추가된 논문을 PaperArchive wiki로 자동 처리하는 스킬. "새 논문 정리해줘", "zotero 논문 처리해줘", "ingest", "논문 추가됐어", "zotero sync해줘", "새로 추가한 논문 wiki에 넣어줘", "paper ingest", "논문 요약해서 저장해줘" 등 Zotero 논문을 wiki로 옮기고 싶을 때 항상 사용. 논문 추가·정리 맥락이 보이면 이 스킬 실행을 제안만 하고, 사용자가 지시하면 실행.
 ---
 
 # Zotero → PaperArchive Ingest
