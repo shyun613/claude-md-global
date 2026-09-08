@@ -1,30 +1,42 @@
 #!/usr/bin/env python3
-"""tmux 세션의 Codex TUI와 통신하는 브리지 (review-loop 스킬용).
+"""tmux 세션의 Codex TUI와 통신하는 브리지 (review-loop / review-codex 스킬용).
 
 서브커맨드:
-  resolve --session S --cwd DIR   세션/코덱스 확보 (없으면 read-only로 생성), 상태 JSON 출력
+  resolve --session S --cwd DIR   기존 세션/codex 확보만 한다 (**생성하지 않음**).
+                                  세션 없음 / codex 프로세스 없음 → error JSON + exit 6
+  create  --session S --cwd DIR   사용자 확인을 받은 뒤에만 호출. CODEX_CMD 로 codex를 새로 띄운다
+                                  (이미 떠 있으면 already_running + exit 4)
   send    --session S --text-file F [--force]   idle 확인 후 프롬프트 주입+제출, marker JSON 출력
   wait    --session S --marker JSON [--max-seconds N] [--interval N]   완료 대기 (exit 0=완료, 3=아직, 4=오류)
   last    --session S [--rollout F]   마지막 agent_message 전문 출력
+  snapshot --cwd DIR              워킹 트리 스냅샷 트리 객체 생성 (델타 리뷰용). tmux 무관.
+
+생성 명령은 CODEX_CMD 상수 하나로 고정한다 (모델 gpt-6-astra, reasoning effort high,
+승인·샌드박스 우회). 이 호스트는 bwrap 샌드박스가 죽어 있어 --sandbox 계열로 띄우면
+codex가 파일을 전혀 읽지 못하므로 read-only 생성 경로는 두지 않는다.
 
 검증된 메커니즘:
   - pane_pid → 자손 중 comm==codex → /proc/<pid>/fd 에서 열린 rollout jsonl
   - 여러 rollout 중 첫 줄 session_meta의 source=="cli" 인 것이 메인 TUI 세션 (나머지는 서브에이전트)
   - rollout 파일은 첫 메시지 제출 후에야 생성됨 (신규 세션은 send 후에 잡힘)
   - task_started/task_complete 이벤트로 busy/완료 판정
+  - tmux 타깃은 모두 '=' 정확 일치 접두사를 쓴다 (접두사 매칭으로 codex → codex-extra 에
+    잘못 붙는 사고를 근본 차단)
 """
 import argparse
 import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 SESS_DIR = os.path.expanduser("~/.codex/sessions")
+CODEX_CMD = "codex --dangerously-bypass-approvals-and-sandbox -m gpt-6-astra -c model_reasoning_effort=high"
 
 
-def sh(cmd):
-    return subprocess.run(cmd, capture_output=True, text=True)
+def sh(cmd, env=None):
+    return subprocess.run(cmd, capture_output=True, text=True, env=env)
 
 
 def die(msg, code=4):
@@ -32,13 +44,19 @@ def die(msg, code=4):
     sys.exit(code)
 
 
+def tgt(session, window=None):
+    """tmux 타깃 문자열 — '=' 접두사 + 콜론으로 세션 정확 일치만 허용 (콜론 없으면 윈도우 이름으로 해석됨)."""
+    return "=%s:%s" % (session, window) if window else "=%s:" % session
+
+
 def session_exists(name):
-    return sh(["tmux", "has-session", "-t", name]).returncode == 0
+    return sh(["tmux", "has-session", "-t", tgt(name)]).returncode == 0
 
 
 def find_codex(session):
     """세션의 모든 pane 자손에서 codex 프로세스 탐색. (pane_id, pid) 또는 None."""
-    r = sh(["tmux", "list-panes", "-s", "-t", session, "-F", "#{pane_id} #{pane_pid}"])
+    r = sh(["tmux", "list-panes", "-s", "-t", tgt(session),
+            "-F", "#{session_name} #{pane_id} #{pane_pid}"])
     if r.returncode != 0:
         return None
     children, comm = {}, {}
@@ -50,7 +68,12 @@ def find_codex(session):
         children.setdefault(ppid, []).append(pid)
         comm[pid] = c
     for line in r.stdout.splitlines():
-        pane_id, pane_pid = line.split()
+        fields = line.split()
+        if len(fields) != 3:
+            continue
+        sess_name, pane_id, pane_pid = fields
+        if sess_name != session:  # 이중 안전장치: 접두사 매칭된 다른 세션 배제
+            continue
         queue = [int(pane_pid)]
         while queue:
             p = queue.pop(0)
@@ -58,6 +81,12 @@ def find_codex(session):
                 return pane_id, p
             queue.extend(children.get(p, []))
     return None
+
+
+def pane_session_name(pane):
+    """pane id(%N)가 실제로 속한 세션 이름 (스킬 교차확인용)."""
+    r = sh(["tmux", "display", "-p", "-t", pane, "#{session_name}"])
+    return r.stdout.strip() if r.returncode == 0 else None
 
 
 def main_rollout(pid):
@@ -107,14 +136,14 @@ def is_idle(rollout):
     last = None
     with open(rollout) as fh:
         for line in fh:
-            if not any(t in line for t in ('"task_started"', '"task_complete"', '"turn_aborted"')):
+            if not any(k in line for k in ('"task_started"', '"task_complete"', '"turn_aborted"')):
                 continue
             try:
-                t = json.loads(line).get("payload", {}).get("type")
+                ty = json.loads(line).get("payload", {}).get("type")
             except ValueError:
                 continue
-            if t in ("task_started", "task_complete", "turn_aborted"):
-                last = t
+            if ty in ("task_started", "task_complete", "turn_aborted"):
+                last = ty
     return last != "task_started"
 
 
@@ -156,28 +185,53 @@ def wait_tui_ready(session, timeout=60):
 
 
 def cmd_resolve(a):
-    created = False
+    """기존 세션의 codex를 찾기만 한다. 생성은 하지 않는다 (create 서브커맨드가 담당)."""
+    hint = "사용자 확인 후 `create --session %s --cwd %s`" % (a.session, a.cwd)
     if not session_exists(a.session):
-        r = sh(["tmux", "new-session", "-d", "-s", a.session, "-c", a.cwd, "-x", "220", "-y", "50"])
-        if r.returncode != 0:
-            die("tmux new-session 실패: " + r.stderr.strip())
-        sh(["tmux", "send-keys", "-t", a.session, "codex --sandbox read-only", "Enter"])
-        created = True
+        print(json.dumps({"error": "no_session", "session": a.session, "cwd": a.cwd,
+                          "hint": hint}, ensure_ascii=False))
+        sys.exit(6)
     found = find_codex(a.session)
-    if not found and not created:
-        # 세션은 있는데 codex가 없음 → 리뷰용 window를 새로 열어 read-only codex 실행
-        r = sh(["tmux", "new-window", "-t", a.session, "-n", "review", "-c", a.cwd])
-        if r.returncode != 0:
-            die("tmux new-window 실패: " + r.stderr.strip())
-        sh(["tmux", "send-keys", "-t", a.session + ":review", "codex --sandbox read-only", "Enter"])
-        created = True
     if not found:
-        found = wait_tui_ready(a.session)
+        print(json.dumps({"error": "no_codex_process", "session": a.session, "cwd": a.cwd,
+                          "hint": hint}, ensure_ascii=False))
+        sys.exit(6)
     pane, pid = found
     rollout = main_rollout(pid)
-    print(json.dumps({"session": a.session, "pane": pane, "codex_pid": pid,
-                      "rollout": rollout, "created_readonly": created,
+    print(json.dumps({"session": a.session, "pane": pane, "pane_session": pane_session_name(pane),
+                      "codex_pid": pid, "rollout": rollout,
                       "idle": is_idle(rollout)}, ensure_ascii=False))
+
+
+def cmd_create(a):
+    """사용자 확인을 받은 뒤에만 호출: CODEX_CMD 로 codex TUI를 새로 띄운다."""
+    exists = session_exists(a.session)
+    if exists:
+        found = find_codex(a.session)
+        if found:
+            print(json.dumps({"error": "already_running", "session": a.session,
+                              "pane": found[0], "codex_pid": found[1],
+                              "hint": "이미 codex가 떠 있다 — create 대신 resolve를 써라"},
+                             ensure_ascii=False))
+            sys.exit(4)
+        r = sh(["tmux", "new-window", "-t", tgt(a.session), "-n", "review", "-c", a.cwd,
+                "-P", "-F", "#{pane_id}"])
+        if r.returncode != 0:
+            die("tmux new-window 실패: " + r.stderr.strip())
+    else:
+        r = sh(["tmux", "new-session", "-d", "-s", a.session, "-c", a.cwd, "-x", "220", "-y", "50",
+                "-P", "-F", "#{pane_id}"])
+        if r.returncode != 0:
+            die("tmux new-session 실패: " + r.stderr.strip())
+    # tmux 3.4의 target-pane은 '=S'(콜론 없는 형태)를 해석하지 못한다 → 갓 만든 pane id로 직접 보낸다.
+    target = r.stdout.strip()
+    if not target.startswith("%"):
+        die("새 pane id를 얻지 못함: " + repr(r.stdout))
+    sh(["tmux", "send-keys", "-t", target, CODEX_CMD, "Enter"])
+    pane, pid = wait_tui_ready(a.session)
+    print(json.dumps({"session": a.session, "pane": pane, "codex_pid": pid,
+                      "rollout": main_rollout(pid), "created": True, "cwd": a.cwd,
+                      "model": "gpt-6-astra", "effort": "high"}, ensure_ascii=False))
 
 
 def cmd_send(a):
@@ -229,6 +283,40 @@ def cmd_last(a):
     print(msg)
 
 
+def cmd_snapshot(a):
+    """워킹 트리 전체(untracked 포함, .gitignore 준수)의 트리 객체를 만든다 — 델타 리뷰용.
+
+    임시 GIT_INDEX_FILE 에서만 add 하므로 실제 인덱스·워킹 트리·refs·브랜치는 무변경이다.
+    라운드 r 직전에 호출해 tree_r 을 기록해 두면 `git diff <tree_{r-1}> <tree_r>` 이 그 라운드의 델타다.
+    """
+    d = a.cwd
+    if not os.path.isdir(d):
+        die("디렉터리가 아님: " + d)
+    if sh(["git", "-C", d, "rev-parse", "--git-dir"]).returncode != 0:
+        die("git 리포가 아님: " + d)
+    tmp_index = tempfile.mktemp(prefix="codex-bridge-index-")
+    env = {**os.environ, "GIT_INDEX_FILE": tmp_index}
+    try:
+        # HEAD 가 있으면 그 트리로 임시 인덱스를 채운 뒤 워킹 트리를 얹는다 (최초 커밋 전이면 건너뜀).
+        if sh(["git", "-C", d, "rev-parse", "--verify", "-q", "HEAD"]).returncode == 0:
+            r = sh(["git", "-C", d, "read-tree", "HEAD"], env)
+            if r.returncode != 0:
+                die("git read-tree 실패: " + r.stderr.strip())
+        r = sh(["git", "-C", d, "add", "-A"], env)
+        if r.returncode != 0:
+            die("git add -A 실패: " + r.stderr.strip())
+        r = sh(["git", "-C", d, "write-tree"], env)
+        if r.returncode != 0:
+            die("git write-tree 실패: " + r.stderr.strip())
+        print(json.dumps({"tree": r.stdout.strip(), "cwd": os.path.abspath(d)}))
+    finally:
+        for p in (tmp_index, tmp_index + ".lock"):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -237,6 +325,11 @@ def main():
     p.add_argument("--session", required=True)
     p.add_argument("--cwd", required=True)
     p.set_defaults(fn=cmd_resolve)
+
+    p = sub.add_parser("create")
+    p.add_argument("--session", required=True)
+    p.add_argument("--cwd", required=True)
+    p.set_defaults(fn=cmd_create)
 
     p = sub.add_parser("send")
     p.add_argument("--session", required=True)
@@ -255,6 +348,10 @@ def main():
     p.add_argument("--session", required=True)
     p.add_argument("--rollout")
     p.set_defaults(fn=cmd_last)
+
+    p = sub.add_parser("snapshot")
+    p.add_argument("--cwd", required=True)
+    p.set_defaults(fn=cmd_snapshot)
 
     a = ap.parse_args()
     a.fn(a)
