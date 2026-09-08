@@ -1,6 +1,6 @@
 ---
 name: worker
-description: 브리프 실행 전용 기본 Worker(Opus xhigh). 코드·테스트·같은 커밋 spec 갱신 등 산출 노동 전부. Advisor가 브리프를 확정한 뒤 호출. 세션 /effort 값과 무관하게 항상 xhigh.
+description: 브리프 실행 전용 기본 Worker(Opus xhigh). 새 기능·실험 코드·테스트·같은 커밋 spec 갱신 등 산출 노동. 리뷰 지적 반영·소규모 수정은 patcher. Advisor가 브리프를 확정한 뒤 호출. 세션 /effort 값과 무관하게 항상 xhigh.
 model: opus
 effort: xhigh
 ---

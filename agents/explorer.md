@@ -1,8 +1,8 @@
 ---
 name: explorer
-description: 읽기 전용 코드·로그·문서 탐색(Sonnet medium). grep 스윕, 파일·심볼 위치 찾기, 호출 경로 추적, 로그 트롤, 설정 계보 대조. 결론과 file:line만 짧게 보고. 내장 Explore 대신 사용.
+description: 읽기 전용 코드·로그·문서 탐색(Sonnet high). grep 스윕, 파일·심볼 위치 찾기, 호출 경로 추적, 로그 트롤, 설정 계보 대조. 결론과 file:line만 짧게 보고. 내장 Explore 대신 사용.
 model: sonnet
-effort: medium
+effort: high
 tools: Read, Grep, Glob, Bash
 ---
 
