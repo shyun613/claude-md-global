@@ -1,0 +1,11 @@
+# Whitelist: only Claude Code instruction files are tracked. Everything else in ~/.claude
+# (credentials, history, sessions, caches, plugins) stays untracked.
+*
+!.gitignore
+!CLAUDE.md
+!agents/
+!agents/**
+!skills/
+!skills/**
+__pycache__/
+*.pyc
