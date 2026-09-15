@@ -39,7 +39,7 @@
   xhigh 단계 지시가 오면 Advisor는 `CLAUDE_EFFORT`를 확인해 high면 한 번 되묻고 멈춘다.
 - 서브에이전트 effort는 정의 파일이 세션 값보다 우선한다. `CLAUDE_CODE_EFFORT_LEVEL` 환경변수는 정의 파일까지 덮어쓰므로 설정하지 않는다.
 - settings의 `model`·`modelSettings` 키는 전체 ID(`claude-fable-5-1`, `claude-opus-5`)로 쓴다. 세대가 바뀌어 키가 안 맞으면
-  Advisor가 세션 초반에 알리고 사용자가 수정한다. settings·에이전트 정의 변경은 떠 있는 세션에 반영되지 않는다 → `claude --resume`.
+  Advisor가 세션 초반에 알리고 사용자가 수정한다. settings 변경은 떠 있는 세션에 반영되지 않는다 → `claude --resume`. 에이전트 정의는 기존 파일 편집이면 다음 위임부터 자동 반영(새 agents 디렉터리·`--add-dir` 하위·`--disable-slash-commands` 만 재시작).
 
 ## 코드 검증
 
