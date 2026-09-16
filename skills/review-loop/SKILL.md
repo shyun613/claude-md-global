@@ -1,16 +1,16 @@
 ---
 name: review-loop
-description: Cross-review loop where Claude workers write code and Codex (in an orca tab or tmux session) reviews it in detail. Repeats retrieve-review→assess→fix→re-review up to 5 rounds, terminating on VERDICT. Use when a coding task should be iterated with Codex cross-review (e.g. /review-loop <task description>).
-argument-hint: "[--tab <name>|--terminal <handle>|--session <tmux>] <coding task description>"
+description: Cross-review loop where Claude workers write code and Codex (`codex exec`, non-interactive, read-only sandbox) reviews it in detail. Repeats retrieve-review→assess→fix→re-review up to 5 rounds, terminating on VERDICT. Use when a coding task should be iterated with Codex cross-review (e.g. /review-loop <task description>).
+argument-hint: "<coding task description>"
 ---
 
 # review-loop
 
-역할 분리: **구현 = `worker`, 라운드 수정 = `patcher`**, **리뷰 = Codex(orca 탭/tmux 세션, 읽기 전용)**, **판정·지시·보고 = 너(메인 세션)**.
+역할 분리: **구현 = `worker`, 라운드 수정 = `patcher`**, **리뷰 = Codex(`codex exec` 비대화형 스레드, read-only 샌드박스)**, **판정·지시·보고 = 너(메인 세션)**.
 
 **사용자의 명시 지시("보내/진행/리뷰 돌려") 없이 이 스킬이 호출됐다면 즉시 중단하고 그 사실만 보고한다.**
 
-`~/.claude/skills/review-loop/common.md` 의 **§A~§C를 읽고 시작한다**(대상 확보·프롬프트 규칙·대기 회수). §D는 exit 4/5, wait exit 3 누적, 중단 시에만.
+`~/.claude/skills/review-loop/common.md` 의 **§A~§C를 읽고 시작한다**(실행 확인·프롬프트 규칙·실행 대기 회수). §D는 run/wait exit 4/5, wait exit 3 누적, 중단 시에만.
 
 ## 0. 완료 기준 (worker·patcher 공통)
 
@@ -26,7 +26,7 @@ argument-hint: "[--tab <name>|--terminal <handle>|--session <tmux>] <coding task
 
 ## 2. 상태 파일·스냅샷
 
-- 상태 파일: `$CLAUDE_JOB_DIR/tmp/review_loop_state.json` (변수 없으면 `/tmp/review-loop-<리포 디렉터리명>/state.json`). 라운드별 `tree`·`verdict`·`issues` 저장. `issues` 항목 = `{id, sev, file, line, msg(리뷰 원문), parent, out_of_scope, contract, done_when, status, evidence}`. `id` 는 `R1-M3` 식 고정 ID로 라운드가 바뀌어도 유지, `parent` 는 파생된 이전 이슈 ID, `contract` 는 원래 계약 포인터(브리프 §·spec 행), `status` ∈ {open, patched, verified, rebutted, deferred}. `verified` 는 Advisor 가 `evidence` 를 쓴 뒤에만. 동일 미해결은 기존 ID 유지, 수정으로 생긴 별도 결함은 새 ID 와 `parent` 부여. 라운드 1 전 worker 인수 기록 경로는 `worker_acceptance`.
+- 상태 파일: `$CLAUDE_JOB_DIR/tmp/review_loop_state.json` (변수 없으면 `/tmp/review-loop-<리포 디렉터리명>/state.json`). 라운드별 `tree`·`verdict`·`issues` 저장. `issues` 항목 = `{id, sev, file, line, msg(리뷰 원문), parent, out_of_scope, contract, done_when, status, evidence}`. `id` 는 `R1-M3` 식 고정 ID로 라운드가 바뀌어도 유지, `parent` 는 파생된 이전 이슈 ID, `contract` 는 원래 계약 포인터(브리프 §·spec 행), `status` ∈ {open, patched, verified, rebutted, deferred}. `verified` 는 Advisor 가 `evidence` 를 쓴 뒤에만. 동일 미해결은 기존 ID 유지, 수정으로 생긴 별도 결함은 새 ID 와 `parent` 부여. 라운드 1 전 worker 인수 기록 경로는 `worker_acceptance`. 루프 스레드 `thread_id`(라운드 1 `run` 의 `result.json`)를 최상위에, 라운드별 `run_dir`·`usage` 를 `rounds[]` 에 기록한다.
 - 라운드 r 리뷰 요청 **직전에** `$BRIDGE snapshot --cwd <리포 절대경로>` → `tree` 를 `tree_r` 로 기록. (임시 인덱스만 — 워킹 트리·인덱스 무변경)
 
 ## 3. 리뷰 요청 (라운드 r/5)
@@ -40,7 +40,7 @@ argument-hint: "[--tab <name>|--terminal <handle>|--session <tmux>] <coding task
 {common.md §B 절대 규칙 1~5}
 
 ## 작업 맥락
-{목표 요약. 리포 절대경로와 브랜치/커밋 — codex 세션은 cwd가 다를 수 있다}
+{목표 요약. 리포 절대경로와 브랜치/커밋}
 
 ## 변경 사항
 {r=1: 전체 변경(워킹 트리 vs <base>) — git diff --stat 또는 변경 파일 목록}
@@ -55,21 +55,15 @@ argument-hint: "[--tab <name>|--terminal <handle>|--session <tmux>] <coding task
 ## 출력 형식
 - 지적마다: 심각도(critical/major/minor), 파일:라인, 문제, 권장 수정.
 {common.md §B 출력 형식 6~9}
-- 리뷰의 마지막 줄은 반드시 정확히 다음 중 하나여야 한다:
-  - VERDICT: APPROVED
-  - VERDICT: NEEDS_CHANGES (critical: yes)
-  - VERDICT: NEEDS_CHANGES (critical: no)
+- 최종 응답은 스키마대로 JSON 하나만 낸다(브리지 `--schema`): {"verdict":"APPROVED|NEEDS_CHANGES","critical":true|false,"issues":[{"sev","file","line","msg","parent","out_of_scope"}],"review":"리뷰 전문(markdown)"}. `review` 에 지적 상세·권장 수정·이전 항목 재확인 결과를 쓴다. `issues` 는 `review` 의 지적과 1:1.
 - APPROVED 는 critical/major 지적이 하나도 없을 때만(범위 밖 설계 제안 `out_of_scope` 는 집계에서 제외).
-- 그 줄 바로 앞에 JSON 블록 하나:
-  {"verdict":"APPROVED|NEEDS_CHANGES","critical":true|false,
-   "issues":[{"sev":"critical|major|minor","file":"path","line":123,"msg":"한 문장","parent":"이전 이슈 ID 또는 null","out_of_scope":false}]}
 ```
 
-전송·대기·회수는 §C.
+실행·대기·회수는 §C(`--schema review_schema.json` 필수, 라운드 2 이상은 `--thread`).
 
 ## 4. 판정·수정 (patcher)
 
-- 텍스트 `VERDICT:` 와 JSON이 불일치하면 보수적으로 **NEEDS_CHANGES**. JSON이 없으면 텍스트로 판정하고 지적은 서술에서 추린다. VERDICT 줄도 없으면 NEEDS_CHANGES.
+- `last.md` JSON 의 `verdict` 로 판정한다. `issues` 가 비었는데 `review` 본문에 critical/major 서술이 있으면 보수적으로 **NEEDS_CHANGES**.
 - `issues` 를 상태 파일에 저장(고정 ID 부여·`contract` 기입)하고, 각 지적을 직접 코드로 검증해라 — Codex도 틀린다. 타당하면 `done_when` 을 §0 규칙으로 쓴다.
 - 범위 밖 설계 제안(`out_of_scope`)은 별도 보고하며 VERDICT·수정 대상·종료 시 잔존 결함 집계에서 제외한다. 범위 여부는 Advisor 가 원래 작업 계약과 대조해 최종 판단한다(Codex 표시는 참고).
 - **APPROVED** → 성공 종료·최종 보고.

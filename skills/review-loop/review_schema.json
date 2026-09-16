@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": {"type": "string", "enum": ["APPROVED", "NEEDS_CHANGES"]},
+    "critical": {"type": "boolean"},
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "sev": {"type": "string", "enum": ["critical", "major", "minor"]},
+          "file": {"type": "string"},
+          "line": {"type": ["integer", "null"]},
+          "msg": {"type": "string"},
+          "parent": {"type": ["string", "null"]},
+          "out_of_scope": {"type": "boolean"}
+        },
+        "required": ["sev", "file", "line", "msg", "parent", "out_of_scope"],
+        "additionalProperties": false
+      }
+    },
+    "review": {"type": "string"}
+  },
+  "required": ["verdict", "critical", "issues", "review"],
+  "additionalProperties": false
+}
